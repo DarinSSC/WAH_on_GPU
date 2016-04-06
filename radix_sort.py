@@ -144,9 +144,6 @@ def radix_sort(arr, rid):
         
         base_reduction_block_num = block_num
         base_reduction_block_size = TPB_MAX
-#        base_reduction_block_num = max(block_num/2, 1)
-#        if block_num == 1:
-#            base_reduction_block_size /= 2
         
         print 'base_reduction_block_num: %d'%base_reduction_block_num
         tmp_out = numpy.zeros(base_reduction_block_num, dtype='int64')
@@ -162,17 +159,6 @@ def radix_sort(arr, rid):
         #then do scanning(one_list and zero_list at the same time)
         print 'begin scan'
         Blelloch_scan_caller(d_zero_list, d_one_list, base)
-#        tmp_zero_list = numpy.array(zero_list)
-#        tmp_one_list = numpy.array(one_list)
-#        d_zero_list.to_host(stream)
-#        d_one_list.to_host(stream)
-#        stream.synchronize()
-#        print 'after scan,d_zero_list:'
-#        print zero_list
-#        print 'after scan, d_one_list:'
-#        print one_list
-#        one_list = tmp_one_list
-#        zero_list = tmp_zero_list
         
         print 'scan finished'
         print

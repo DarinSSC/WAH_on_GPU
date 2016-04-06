@@ -12,7 +12,7 @@ def openfile(path):
 		attr_values = [[] for i in xrange(attr_num)]
 		for attr in attr_list:
 			attr_dict[attr] = set([])#usi00ng set to avoid repetition
-		for line in file_ob.readlines():
+		for line in file_ob.readlines()[:3100]:
 			line = line.strip('\n')
 			tmp_list = string.split(line,',')
 			for i in xrange(len(tmp_list)):

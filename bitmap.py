@@ -38,13 +38,130 @@ def produce_chId_lit_gpu(rid, literal, chunk_id):
 	off_set = 30-rid[i]%31
 	literal[i] = (literal[i]|1<<off_set)
 
+'''######   Wrong version   #########
 @cuda.jit('void(int32[:], int64[:], int32, int32[:])')
 def produce_flag(input_data, chunk_id, length, flag):#flag initialized to 1
 	i = cuda.grid(1)
 	if i<length and i>0:
-		if input_data[i]==input_data[i-1] and chunk_id[i] == chunk_id[i-1]:
+		if input_data[i] == input_data[i-1] and chunk_id[i] == chunk_id[i-1]:
 			flag[i] = 0
+'''
 
+@cuda.jit('void(int32[:], int64[:], int32, int32[:])')
+def produce_flag(input_data, chunk_id, length, flag):#flag initialized to 1
+	i = cuda.grid(1)
+	if i<length:
+		if i == 0 or (input_data[i] != input_data[i-1] or chunk_id[i] != chunk_id[i-1]):
+			flag[i] = 1
+
+@cuda.jit('void(int64[:], int64[:], int64[:], int64)')
+def get_startPos(dd_flag, d_flag, d_start_pos, length):
+	i = cuda.grid(1)
+	if i<length and dd_flag[i]:
+		d_start_pos[d_flag[i]] = i
+
+@cuda.jit('void(uint32[:], uint32[:], int64)',target='gpu')
+def or_reduction(literal, tmp_out, length):
+    
+    bw = cuda.blockDim.x
+    bx = cuda.blockIdx.x
+    tid = cuda.threadIdx.x
+    shared_list = cuda.shared.array(shape = (tpb), dtype = uint32)
+	
+   
+    i = bx*bw + tid
+    shared_list[tid] = 0x00000000
+    if i<length:
+    	shared_list[tid] = literal[i]
+
+    cuda.syncthreads()
+
+    hop = bw/2
+    while hop > 0:
+        if tid < hop:
+			shared_list[tid] = shared_list[tid] | shared_list[tid+hop]
+			#if i <length:
+			#	print shared_list[tid]
+        cuda.syncthreads()
+        hop /= 2
+    if tid == 0:
+        tmp_out[bx] = shared_list[0]
+        print tmp_out[0]
+
+def reduce_by_key(input_data, chunk_id, literal, length):
+	length = numpy.int64(len(input_data))
+	bin_length = max(len(bin(length-1)),len(bin(tpb-1)))
+	thread_num = numpy.int64(math.pow(2,bin_length))
+	block_num = max(thread_num/tpb,1)
+
+	flag = numpy.zeros(thread_num, dtype='int64')
+	arg_useless = numpy.zeros(thread_num, dtype='int64')
+	stream = cuda.stream()
+	d_flag = cuda.to_device(flag, stream)
+	d_chunk_id = cuda.to_device(chunk_id, stream)
+	d_literal = cuda.to_device(literal, stream)
+	
+	produce_flag[block_num,tpb](input_data, d_chunk_id, length, d_flag)
+	d_flag.to_host(stream)
+	stream.synchronize()
+	
+	start_pos = numpy.ones(length, dtype='int64') * (-1)
+	
+	radix_sort.Blelloch_scan_caller(d_flag, arg_useless, 0)
+	
+	d_start_pos = cuda.to_device(start_pos, stream)
+	dd_flag = cuda.to_device(flag, stream)
+	
+	print 'flag'
+	print flag[:length]
+	#d_flag.to_host(stream)
+	#print 'd_flag'
+	#print flag[:length]
+	
+
+	get_startPos[(length-1)/tpb+1, tpb](dd_flag, d_flag, d_start_pos, length)
+	d_start_pos.to_host(stream)
+	stream.synchronize()
+	
+	start_pos = filter(lambda x: x>=0, start_pos)
+
+	reduced_length = len(start_pos)
+
+	start_pos = list(start_pos)
+	start_pos.append(length)
+
+	reduced_input_data = []
+	reduced_chunk_id = []
+	reduced_literal =[]
+
+	
+	for i in xrange(reduced_length):
+		print start_pos[i], start_pos[i+1]
+		data_to_reduce = literal[start_pos[i]:start_pos[i+1]]
+
+		print data_to_reduce
+		reduce_block_num = (len(data_to_reduce)-1)/tpb + 1 
+		
+		tmp_out = numpy.zeros(reduce_block_num, dtype='uint32')
+		d_tmp_out = cuda.to_device(tmp_out, stream)
+
+		or_reduction[reduce_block_num, tpb](numpy.array(data_to_reduce), d_tmp_out,len(data_to_reduce))
+
+		d_tmp_out.to_host(stream)
+		stream.synchronize()
+		result = 0x00000000
+		for j in xrange(reduce_block_num):
+			result |= tmp_out[j]
+		
+		reduced_input_data.append(input_data[start_pos[i]])
+		reduced_chunk_id.append(chunk_id[start_pos[i]])
+		reduced_literal.append(result)
+	print '************!!!!!!!!!!!!!!!****************'
+
+	
+	return numpy.array(reduced_input_data), numpy.array(reduced_chunk_id), reduced_literal
+	
+'''############  Wrong version   #######################
 @cuda.jit('void(int32[:], int32[:], int32[:], int32, int64)')
 def reduce_by_key_gpu(literal, flag, is_finish, hop, length):
 	i = cuda.grid(1)
@@ -61,7 +178,7 @@ def reduce_by_key(input_data, chunk_id, literal, length):#step 3
 	d_flag = cuda.to_device(flag, stream)
 	d_chunk_id = cuda.to_device(chunk_id, stream)
 	d_literal = cuda.to_device(literal, stream)
-	block_num = length/tpb + 1
+	block_num = (length-1)/tpb + 1
 	produce_flag[block_num,tpb](input_data, d_chunk_id, length, d_flag)
 	d_flag.to_host(stream)
 	print 'flag:'
@@ -83,13 +200,14 @@ def reduce_by_key(input_data, chunk_id, literal, length):#step 3
 	reduced_literal =[]
 	for i in xrange(length):
 		if flag[i]:
-			print '************!!!!!!!!!!!!!!!****************'
-			reduced_input_data.appid.appendend(input_data[i])
-			reduced_chunk_(chunk_id[i])
+			print input_data[i], chunk_id[i], literal[i]
+			reduced_input_data.append(input_data[i])
+			reduced_chunk_id.append(chunk_id[i])
 			reduced_literal.append(literal[i])
 
 	print '************!!!!!!!!!!!!!!!****************'
 	return numpy.array(reduced_input_data), numpy.array(reduced_chunk_id), reduced_literal
+'''
 
 @cuda.jit('void(int32[:], int32[:], int64)')
 def produce_head(reduced_input_data, d_head, reduced_length):
@@ -180,6 +298,10 @@ def getIdx(fill_word,reduced_literal, reduced_length, head, cardinality):#step 5
 	#print offset
 	
 	key_length = numpy.zeros(cardinality, dtype='int64')
+
+	print '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+	print "cardinality:%d"%cardinality
+	print "len(off_set)%d"%len(offset)
 	for i in xrange(cardinality-1):
 		key_length[i] = offset[i+1] - offset[i]
 	key_length[cardinality-1] = out_index_length - offset[cardinality-1]
@@ -213,17 +335,30 @@ def get_idxlen_offset(fill_0_word,scanned_input_data):#step 6: get offsets and k
 if __name__ == '__main__':
 	path = 'data.txt'	#file path
 	attr_dict,attr_values,attr_value_NO = data.openfile(path)
+	print attr_dict['worker_class'], attr_value_NO[0]
 	total_row = len(attr_values[0])
 	input_data = numpy.array(attr_values[0])
+	print input_data
 	length = input_data.shape[0]
 	rid = numpy.arange(0,length)
-	print input_data
+
 	#step1 sort
 	radix_sort.radix_sort(input_data,rid)
-	cardinality = input_data[-1]+1 #
+	print input_data
+	
+	f1 = open('input_data.txt', 'w')
+	f1.write(str(list(input_data)))
+	f2 = open("rid.txt", 'w')
+	f2.write(str(list(rid)))
+	f1.close()
+	f2.close()
+
+	#cardinality = input_data[-1]+1 
+	cardinality = len(attr_dict['worker_class'])
 	print 'rid:\n',rid
 	literal = numpy.zeros(length, dtype = 'uint32')
 	chunk_id = numpy.zeros(length, dtype = 'int64')
+	
 	stream = cuda.stream()
 	d_rid = cuda.to_device(rid, stream)
 	d_chunk_id = cuda.to_device(chunk_id, stream)
@@ -234,17 +369,51 @@ if __name__ == '__main__':
 	d_chunk_id.to_host(stream)
 	d_literal.to_host(stream)
 	stream.synchronize()
-
+	print chunk_id
+	for i in literal:
+		print i
 	#step3 reduce by key(value, chunk_id)
-	reduced_input_data,	reduced_chunk_id, reduced_literal = reduce_by_key(input_data, d_chunk_id, d_literal, length)
-	reduced_length = reduced_input_data.shape[0]
+	reduced_input_data,	reduced_chunk_id, reduced_literal = reduce_by_key(input_data, chunk_id, literal, length)
+	reduced_length = reduced_input_data.shape[0]#row
+
+	f3 = open('reduced_input_data.txt', 'w')
+	f3.write(str(list(reduced_input_data)))
+	f4 = open("reduced_chunk_id.txt", 'w')
+	f4.write(str(list(reduced_chunk_id)))
+	f5 = open("reduced_literal.txt", 'w')
+	f5.write(str(list(reduced_literal)))
+	f3.close()
+	f4.close()
+	f5.close()
 
 	#step4 produce 0-Fill word
 	fill_word, head = produce_fill(reduced_input_data, reduced_chunk_id, reduced_length)
 
 	for i in xrange(reduced_length):
 		print reduced_input_data[i], reduced_chunk_id[i], bin(reduced_literal[i]), fill_word[i]
+
+	f6 = open("fill_word.txt", 'w')
+	f6.write(str(list(fill_word)))
+	f6.close()
 	
 	#step 5 & 6: get index by interleaving 0-Fill word and literal(also remove all-zeros word)
 	out_index, offset, key_length = getIdx(fill_word,reduced_literal, reduced_length, head, cardinality)
+	print '*****************index:'
+	print out_index
+	for i in range(len(out_index)):
+		print bin(out_index[i])
+	print '*****************offset:'
+	print offset
+	print '*****************length:'
+	print key_length
+
+	f6 = open('out_index.txt', 'w')
+	f6.write(str(list(out_index)))
+	f7 = open("offset.txt", 'w')
+	f7.write(str(list(offset)))
+	f8 = open("key_length.txt", 'w')
+	f8.write(str(list(key_length)))
+	f6.close()
+	f7.close()
+	f8.close()
 	
